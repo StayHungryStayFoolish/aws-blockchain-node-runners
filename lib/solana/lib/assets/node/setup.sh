@@ -209,6 +209,7 @@ mkdir /data/log
 chown -R bcuser:bcuser /data
 chown -R bcuser:bcuser /home/bcuser
 
+cd /home/ubuntu
 wget https://go.dev/dl/go1.21.4.linux-amd64.tar.gz -O go.tar.gz
 sudo tar -xzvf go.tar.gz -C /usr/local
 
