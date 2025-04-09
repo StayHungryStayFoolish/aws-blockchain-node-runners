@@ -205,8 +205,16 @@ chmod +x /home/bcuser/bin/node-service.sh
 
 mkdir /data/data/ledger
 ln -s /data/data/ledger /home/bcuser
+mkdir /data/log
 chown -R bcuser:bcuser /data
 chown -R bcuser:bcuser /home/bcuser
+
+wget https://go.dev/dl/go1.21.4.linux-amd64.tar.gz -O go.tar.gz
+sudo tar -xzvf go.tar.gz -C /usr/local
+
+echo "export GOROOT=/usr/local/go" >> ~/.bashrc
+echo "export GOPATH=/root/go" >> ~/.bashrc
+echo "export PATH=\$GOPATH/bin:\$GOROOT/bin:\$PATH" >> ~/.bashrc
 
 echo "Starting node as a service"
 

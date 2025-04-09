@@ -4,7 +4,7 @@ set -o nounset
 set -o pipefail
 # Remove empty snapshots
 find "/data/data/ledger" -name "snapshot-*" -size 0 -print -exec rm {} \; || true
-export RUST_LOG=error
+export RUST_LOG=info
 export RUST_BACKTRACE=full
 export SOLANA_METRICS_CONFIG=__SOLANA_METRICS_CONFIG__
 
@@ -29,4 +29,4 @@ __ENTRY_POINTS__ \
 --limit-ledger-size \
 --accounts /data/accounts \
 --incremental-snapshot-interval-slots 0 \
---log -
+--log /data/log/validator.log
