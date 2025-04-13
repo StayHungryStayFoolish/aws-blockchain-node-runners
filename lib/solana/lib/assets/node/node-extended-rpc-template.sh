@@ -4,7 +4,7 @@ set -o nounset
 set -o pipefail
 # Remove empty snapshots
 find "/data/data/ledger" -name "snapshot-*" -size 0 -print -exec rm {} \; || true
-export RUST_LOG=error
+export RUST_LOG=info
 export RUST_BACKTRACE=full
 export SOLANA_METRICS_CONFIG=__SOLANA_METRICS_CONFIG__
 
@@ -22,6 +22,8 @@ __KNOWN_VALIDATORS__ \
 __ENTRY_POINTS__ \
 --no-voting \
 --full-rpc-api \
+--minimal-snapshot-download-speed 104857600 \
+--rpc-pubsub-enable-block-subscription \
 --rpc-port 8899 \
 --gossip-port 8800 \
 --dynamic-port-range 8800-8816 \
@@ -41,4 +43,4 @@ __ENTRY_POINTS__ \
 --account-index-exclude-key kinXdEcpDQeHPEuQnqmUgtYykqKGVFq6CeVX5iAHJq6 \
 --account-index-exclude-key TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA \
 --incremental-snapshot-interval-slots 0 \
---log -
+--log /data/log/validator.log
