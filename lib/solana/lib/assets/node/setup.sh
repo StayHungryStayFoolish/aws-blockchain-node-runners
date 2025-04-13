@@ -262,7 +262,7 @@ echo "export PATH=\$GOPATH/bin:\$GOROOT/bin:\$PATH" >> ~/.bashrc
 
 # WS & RPC
 echo 'export WS_URL="ws://'${EC2_INTERNAL_IP}':8900"' >> ~/.bashrc
-echo 'export RPC_URL="ws://'${EC2_INTERNAL_IP}':8899"' >> ~/.bashrc
+echo 'export RPC_URL="http://'${EC2_INTERNAL_IP}':8899"' >> ~/.bashrc
 
 # Account to monitor
 echo 'export MONITORED_ADDRESS="TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"' >> ~/.bashrc
