@@ -252,6 +252,10 @@ echo "Setup Solana testing environment"
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 EC2_INTERNAL_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/local-ipv4)
 
+export GOROOT=/usr/local/go
+export GOPATH=/root/go
+export PATH=$GOPATH/bin:$GOROOT/bin:$PATH
+
 echo "export GOROOT=/usr/local/go" >> ~/.bashrc
 echo "export GOPATH=/root/go" >> ~/.bashrc
 echo "export PATH=\$GOPATH/bin:\$GOROOT/bin:\$PATH" >> ~/.bashrc
@@ -275,7 +279,7 @@ echo "export HTTP_TIMEOUT=\"10s\"" >> ~/.bashrc
 echo "export STATS_INTERVAL=\"5s\"" >> ~/.bashrc
 
 
-cat << EOF > checker.sh
+cat << 'EOF' > checker.sh
 #!/bin/bash
 
 GREEN='\033[0;32m'
@@ -347,13 +351,15 @@ while true; do
 done
 EOF
 
+chmod +x checker.sh
+
 echo "Solana Websocket Go Program"
 mkdir -p $GOPATH/src/ws-solana
 cd $GOPATH/src/ws-solana
 go mod init ws-solana
 go get github.com/gorilla/websocket
 
-cat << EOF > ws-solana.go
+cat << 'EOF' > ws-solana.go
 package main
 
 import (
