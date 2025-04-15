@@ -82,31 +82,31 @@ EOF"
 # Modify 134217728 -> 268435456
 bash -c "cat >/etc/sysctl.d/20-solana-udp-buffers.conf <<EOF
 # Increase UDP buffer size
-net.core.rmem_default=268435456
-net.core.rmem_max=268435456
-net.core.wmem_default=268435456
-net.core.wmem_max=268435456
+net.core.rmem_default=134217728
+net.core.rmem_max=134217728
+net.core.wmem_default=134217728
+net.core.wmem_max=134217728
 EOF"
 
-# New -----------
-bash -c "cat >/etc/sysctl.d/20-solana-swap.conf <<EOF
-vm.swappiness=10
-vm.vfs_cache_pressure=50
-EOF"
-
-bash -c "cat >/etc/sysctl.d/20-solana-slab.conf <<EOF
-vm.min_slab_ratio=5
-vm.min_unmapped_ratio=20
-EOF"
-
-bash -c "cat >/etc/sysctl.d/20-solana-pages.conf <<EOF
-vm.nr_hugepages=32768
-EOF"
-
-bash -c "cat >/etc/sysctl.d/20-solana-netdev.conf <<EOF
-net.core.netdev_budget=6000
-net.core.netdev_budget_usecs=8000
-EOF"
+## New -----------
+#bash -c "cat >/etc/sysctl.d/20-solana-swap.conf <<EOF
+#vm.swappiness=10
+#vm.vfs_cache_pressure=50
+#EOF"
+#
+#bash -c "cat >/etc/sysctl.d/20-solana-slab.conf <<EOF
+#vm.min_slab_ratio=5
+#vm.min_unmapped_ratio=20
+#EOF"
+#
+#bash -c "cat >/etc/sysctl.d/20-solana-pages.conf <<EOF
+#vm.nr_hugepages=8192
+#EOF"
+#
+#bash -c "cat >/etc/sysctl.d/20-solana-netdev.conf <<EOF
+#net.core.netdev_budget=3000
+#net.core.netdev_budget_usecs=4000
+#EOF"
 
 # -----------
 
@@ -117,10 +117,10 @@ sysctl -p /etc/sysctl.d/20-solana-udp-buffers.conf
 sysctl -p /etc/sysctl.d/20-solana-additionals.conf
 
 # New -----------
-sysctl -p /etc/sysctl.d/20-solana-swap.conf
-sysctl -p /etc/sysctl.d/20-solana-slab.conf
-sysctl -p /etc/sysctl.d/20-solana-pages.conf
-sysctl -p /etc/sysctl.d/20-solana-netdev.conf
+#sysctl -p /etc/sysctl.d/20-solana-swap.conf
+#sysctl -p /etc/sysctl.d/20-solana-slab.conf
+#sysctl -p /etc/sysctl.d/20-solana-pages.conf
+#sysctl -p /etc/sysctl.d/20-solana-netdev.conf
 
 # -----------
 
