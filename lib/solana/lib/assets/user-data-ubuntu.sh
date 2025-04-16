@@ -128,7 +128,7 @@ if mount | grep -q "$SOLANA_ACCOUNTS_CACHE_PATH"; then
 fi
 
 mkdir -p "$SOLANA_ACCOUNTS_CACHE_PATH"
-mount -t tmpfs -o size=120G,mode=0755 tmpfs "$SOLANA_ACCOUNTS_CACHE_PATH"
+mount -t tmpfs -o size=240G,mode=0755 tmpfs "$SOLANA_ACCOUNTS_CACHE_PATH"
 
 if ! mount | grep -q "$SOLANA_ACCOUNTS_CACHE_PATH"; then
         echo "tmpfs mount failed, exit"
