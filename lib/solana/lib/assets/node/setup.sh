@@ -89,10 +89,10 @@ net.core.wmem_max=134217728
 EOF"
 
 ## New -----------
-#bash -c "cat >/etc/sysctl.d/20-solana-swap.conf <<EOF
-#vm.swappiness=10
 #vm.vfs_cache_pressure=50
-#EOF"
+bash -c "cat >/etc/sysctl.d/20-solana-swap.conf <<EOF
+vm.swappiness=10
+EOF"
 #
 #bash -c "cat >/etc/sysctl.d/20-solana-slab.conf <<EOF
 #vm.min_slab_ratio=5
@@ -117,7 +117,7 @@ sysctl -p /etc/sysctl.d/20-solana-udp-buffers.conf
 sysctl -p /etc/sysctl.d/20-solana-additionals.conf
 
 # New -----------
-#sysctl -p /etc/sysctl.d/20-solana-swap.conf
+sysctl -p /etc/sysctl.d/20-solana-swap.conf
 #sysctl -p /etc/sysctl.d/20-solana-slab.conf
 #sysctl -p /etc/sysctl.d/20-solana-pages.conf
 #sysctl -p /etc/sysctl.d/20-solana-netdev.conf
