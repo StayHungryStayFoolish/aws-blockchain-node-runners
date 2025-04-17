@@ -110,41 +110,41 @@ else
   /opt/instance/storage/setup.sh /data/accounts xfs "$ACCOUNTS_VOLUME_SIZE"
 fi
 
-echo "Setting Swapfile & Solana Account Index in Memory"
-SWAP_PATH="/data/data/swapfile"
-if [ ! -f "$SWAP_PATH" ]; then
-        echo "Create a 64GB swap file on the disk where the Ledger"
-        fallocate -l 64G "$SWAP_PATH"
-        chmod 600 "$SWAP_PATH"
-        mkswap "$SWAP_PATH"
-        swapon "$SWAP_PATH"
-        echo "$SWAP_PATH none swap sw 0 0" | sudo tee -a /etc/fstab
-fi
-
-SOLANA_ACCOUNTS_CACHE_PATH="/data/solana-accounts-cache"
-if mount | grep -q "$SOLANA_ACCOUNTS_CACHE_PATH"; then
-        echo "Unmount existing tmpfs"
-        umount /data/solana-accounts-cache
-fi
-
-mkdir -p "$SOLANA_ACCOUNTS_CACHE_PATH"
-mount -t tmpfs -o size=240G,mode=0755 tmpfs "$SOLANA_ACCOUNTS_CACHE_PATH"
-
-if ! mount | grep -q "$SOLANA_ACCOUNTS_CACHE_PATH"; then
-        echo "tmpfs mount failed, exit"
-        exit 1
-else
-        echo "tmpfs already mount"
-fi
-
-echo "mkdir Solana accounts cache store path"
-mkdir -p /data/solana-accounts-cache/accounts
-mkdir -p /data/solana-accounts-cache/accounts_index
-mkdir -p /data/solana-accounts-cache/accounts_hash_cache
-mkdir -p /data/solana-accounts-cache/shrink_cache
-chown -R bcuser:bcuser /data/solana-accounts-cache
-
-echo "Finished Swapfile & Solana Account Index in Memory"
+#echo "Setting Swapfile & Solana Account Index in Memory"
+#SWAP_PATH="/data/data/swapfile"
+#if [ ! -f "$SWAP_PATH" ]; then
+#        echo "Create a 64GB swap file on the disk where the Ledger"
+#        fallocate -l 64G "$SWAP_PATH"
+#        chmod 600 "$SWAP_PATH"
+#        mkswap "$SWAP_PATH"
+#        swapon "$SWAP_PATH"
+#        echo "$SWAP_PATH none swap sw 0 0" | sudo tee -a /etc/fstab
+#fi
+#
+#SOLANA_ACCOUNTS_CACHE_PATH="/data/solana-accounts-cache"
+#if mount | grep -q "$SOLANA_ACCOUNTS_CACHE_PATH"; then
+#        echo "Unmount existing tmpfs"
+#        umount /data/solana-accounts-cache
+#fi
+#
+#mkdir -p "$SOLANA_ACCOUNTS_CACHE_PATH"
+#mount -t tmpfs -o size=240G,mode=0755 tmpfs "$SOLANA_ACCOUNTS_CACHE_PATH"
+#
+#if ! mount | grep -q "$SOLANA_ACCOUNTS_CACHE_PATH"; then
+#        echo "tmpfs mount failed, exit"
+#        exit 1
+#else
+#        echo "tmpfs already mount"
+#fi
+#
+#echo "mkdir Solana accounts cache store path"
+#mkdir -p /data/solana-accounts-cache/accounts
+#mkdir -p /data/solana-accounts-cache/accounts_index
+#mkdir -p /data/solana-accounts-cache/accounts_hash_cache
+#mkdir -p /data/solana-accounts-cache/shrink_cache
+#chown -R bcuser:bcuser /data/solana-accounts-cache
+#
+#echo "Finished Swapfile & Solana Account Index in Memory"
 
 if [[ "$STACK_ID" != "none" ]]; then
   /opt/instance/storage/update-cloudwatch-dashboard.sh "$STACK_NAME-$INSTANCE_ID"
