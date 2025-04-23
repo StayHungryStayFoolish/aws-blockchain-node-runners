@@ -363,687 +363,872 @@ cat << 'EOF' > ws-solana.go
 package main
 
 import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "net/http"
-    "os"
-    "strconv"
-    "sync"
-    "time"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"net/http"
+	"os"
+	"sort"
+	"strconv"
+	"sync"
+	"time"
 
-    "github.com/gorilla/websocket"
+	"github.com/gorilla/websocket"
 )
 
 // ========================== Type Definitions ========================== //
 
 // RPCRequest represents a request sent to RPC/WebSocket
 type RPCRequest struct {
-    JsonRPC string      `json:"jsonrpc"`
-    ID      int         `json:"id"`
-    Method  string      `json:"method"`
-    Params  interface{} `json:"params,omitempty"`
+	JsonRPC string      `json:"jsonrpc"`
+	ID      int         `json:"id"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params,omitempty"`
 }
 
 // RPCError represents an error in RPC response
 type RPCError struct {
-    Code    int    `json:"code"`
-    Message string `json:"message"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
 // RPCResponse represents a generic RPC response
 type RPCResponse struct {
-    Jsonrpc string          `json:"jsonrpc"`
-    Result  json.RawMessage `json:"result"`
-    ID      int             `json:"id"`
-    Error   *RPCError       `json:"error,omitempty"`
+	Jsonrpc string          `json:"jsonrpc"`
+	Result  json.RawMessage `json:"result"`
+	ID      int             `json:"id"`
+	Error   *RPCError       `json:"error,omitempty"`
 }
 
 // LogsNotification used to parse logsNotification from WebSocket
 type LogsNotification struct {
-    Jsonrpc string `json:"jsonrpc"`
-    Method  string `json:"method"`
-    Params  struct {
-        Result struct {
-            Context struct {
-                Slot uint64 `json:"slot"`
-            } `json:"context"`
-            Value struct {
-                Signature string   `json:"signature"`
-                Err       any      `json:"err"`
-                Logs      []string `json:"logs"`
-            } `json:"value"`
-        } `json:"result"`
-        Subscription int `json:"subscription"`
-    } `json:"params"`
+	Jsonrpc string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  struct {
+		Result struct {
+			Context struct {
+				Slot uint64 `json:"slot"`
+			} `json:"context"`
+			Value struct {
+				Signature string   `json:"signature"`
+				Err       any      `json:"err"`
+				Logs      []string `json:"logs"`
+			} `json:"value"`
+		} `json:"result"`
+		Subscription int `json:"subscription"`
+	} `json:"params"`
 }
 
 // GetTransactionResult used to parse getTransaction result
 type GetTransactionResult struct {
-    Slot        uint64          `json:"slot"`
-    Transaction json.RawMessage `json:"transaction"`
-    Meta        json.RawMessage `json:"meta"`
+	Slot        uint64          `json:"slot"`
+	Transaction json.RawMessage `json:"transaction"`
+	Meta        json.RawMessage `json:"meta"`
 }
 
 // TransactionJob represents a transaction processing task
 type TransactionJob struct {
-    Signature  string
-    Slot       uint64
-    ReceivedAt time.Time
+	Signature  string
+	Slot       uint64
+	ReceivedAt time.Time
 }
 
 // TransactionResponse represents the result of transaction processing
 type TransactionResponse struct {
-    Success   bool
-    Latency   time.Duration
-    Error     error
-    Signature string
-    Slot      uint64
+	Success   bool
+	Latency   time.Duration
+	Error     error
+	Signature string
+	Slot      uint64
 }
 
 // Config stores application configuration
 type Config struct {
-    WsURL            string
-    RpcURL           string
-    MonitoredAddress string
-    WorkerCount      int
-    JobQueueSize     int
-    MaxRetries       int
-    ReconnectDelay   time.Duration
-    HttpTimeout      time.Duration
-    PingInterval     time.Duration
-    RetryDelay       time.Duration
-    StatsInterval    time.Duration
+	WsURL            string
+	RpcURL           string
+	MonitoredAddress string
+	WorkerCount      int
+	JobQueueSize     int
+	MaxRetries       int
+	ReconnectDelay   time.Duration
+	HttpTimeout      time.Duration
+	PingInterval     time.Duration
+	RetryDelay       time.Duration
+	StatsInterval    time.Duration
 }
 
 // ========================== Constants ========================== //
 
 const (
-    ColorReset  = "\033[0m"
-    ColorGreen  = "\033[32m"
-    ColorYellow = "\033[33m"
-    ColorRed    = "\033[31m"
-    ColorPurple = "\033[35m"
-    ColorBlue   = "\033[34m"
+	ColorReset  = "\033[0m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorRed    = "\033[31m"
+	ColorPurple = "\033[35m"
+	ColorBlue   = "\033[34m"
+
+	// Constants for statistics
+	RecentSamplesSize = 1000 // Size of the recent samples circular buffer
 )
+
+// ========================== CircularBuffer ========================== //
+
+// CircularBuffer implements a fixed-size circular buffer for latency samples
+type CircularBuffer struct {
+	data       []time.Duration
+	capacity   int
+	count      int
+	start      int
+	totalValue time.Duration
+	minValue   time.Duration
+	maxValue   time.Duration
+}
+
+// NewCircularBuffer creates a new circular buffer with specified capacity
+func NewCircularBuffer(capacity int) *CircularBuffer {
+	return &CircularBuffer{
+		data:       make([]time.Duration, capacity),
+		capacity:   capacity,
+		count:      0,
+		start:      0,
+		totalValue: 0,
+		minValue:   math.MaxInt64,
+		maxValue:   0,
+	}
+}
+
+// Add adds a new sample to the circular buffer
+func (cb *CircularBuffer) Add(value time.Duration) {
+	// Calculate position to insert
+	pos := (cb.start + cb.count) % cb.capacity
+
+	// If buffer is full, remove oldest value from totals
+	if cb.count == cb.capacity {
+		oldValue := cb.data[cb.start]
+		cb.totalValue -= oldValue
+
+		// Update start pointer to point to next oldest item
+		cb.start = (cb.start + 1) % cb.capacity
+		cb.count--
+
+		// If we're removing the min/max, we'll need to recalculate
+		needRecalculateMin := (oldValue == cb.minValue)
+		needRecalculateMax := (oldValue == cb.maxValue)
+
+		// Add new value
+		cb.data[pos] = value
+		cb.totalValue += value
+		cb.count++
+
+		// Update min/max if needed
+		if value < cb.minValue {
+			cb.minValue = value
+		} else if needRecalculateMin {
+			// Recalculate minimum
+			cb.recalculateMin()
+		}
+
+		if value > cb.maxValue {
+			cb.maxValue = value
+		} else if needRecalculateMax {
+			// Recalculate maximum
+			cb.recalculateMax()
+		}
+	} else {
+		// Buffer not full yet, just add value
+		cb.data[pos] = value
+		cb.totalValue += value
+		cb.count++
+
+		// Update min/max
+		if value < cb.minValue {
+			cb.minValue = value
+		}
+		if value > cb.maxValue {
+			cb.maxValue = value
+		}
+	}
+}
+
+// recalculateMin finds the new minimum value in the buffer
+func (cb *CircularBuffer) recalculateMin() {
+	if cb.count == 0 {
+		cb.minValue = math.MaxInt64
+		return
+	}
+
+	min := cb.data[cb.start]
+	for i := 0; i < cb.count; i++ {
+		idx := (cb.start + i) % cb.capacity
+		if cb.data[idx] < min {
+			min = cb.data[idx]
+		}
+	}
+	cb.minValue = min
+}
+
+// recalculateMax finds the new maximum value in the buffer
+func (cb *CircularBuffer) recalculateMax() {
+	if cb.count == 0 {
+		cb.maxValue = 0
+		return
+	}
+
+	max := cb.data[cb.start]
+	for i := 0; i < cb.count; i++ {
+		idx := (cb.start + i) % cb.capacity
+		if cb.data[idx] > max {
+			max = cb.data[idx]
+		}
+	}
+	cb.maxValue = max
+}
+
+// GetMin returns the minimum value in the buffer
+func (cb *CircularBuffer) GetMin() time.Duration {
+	if cb.count == 0 {
+		return 0
+	}
+	return cb.minValue
+}
+
+// GetMax returns the maximum value in the buffer
+func (cb *CircularBuffer) GetMax() time.Duration {
+	if cb.count == 0 {
+		return 0
+	}
+	return cb.maxValue
+}
+
+// GetAvg returns the average value in the buffer
+func (cb *CircularBuffer) GetAvg() time.Duration {
+	if cb.count == 0 {
+		return 0
+	}
+	return cb.totalValue / time.Duration(cb.count)
+}
+
+// GetTotal returns the sum of all values in the buffer
+func (cb *CircularBuffer) GetTotal() time.Duration {
+	return cb.totalValue
+}
+
+// GetCount returns the number of elements currently in the buffer
+func (cb *CircularBuffer) GetCount() int {
+	return cb.count
+}
+
+// ToSlice returns all values in the buffer as a slice
+func (cb *CircularBuffer) ToSlice() []time.Duration {
+	if cb.count == 0 {
+		return []time.Duration{}
+	}
+
+	result := make([]time.Duration, cb.count)
+	for i := 0; i < cb.count; i++ {
+		result[i] = cb.data[(cb.start+i)%cb.capacity]
+	}
+	return result
+}
 
 // ========================== Global Stats ========================== //
 
 type Stats struct {
-    mu                 sync.Mutex
-    totalRequests      int
-    successRequests    int
-    processingRequests int
-    failedRequests     int
-    droppedRequests    int
-    lastPrintTime      time.Time
-    printInterval      time.Duration
-    minLatency         time.Duration
-    maxLatency         time.Duration
-    totalLatency       time.Duration
-    latencyCount       int
-    latencyP50         time.Duration
-    latencyP90         time.Duration
-    latencyP99         time.Duration
-    latencies          []time.Duration
-    latenciesMutex     sync.Mutex
+	mu                 sync.Mutex
+	totalRequests      int
+	successRequests    int
+	processingRequests int
+	failedRequests     int
+	droppedRequests    int
+	lastPrintTime      time.Time
+	printInterval      time.Duration
+
+	globalMinLatency time.Duration
+	globalMaxLatency time.Duration
+	totalLatency     time.Duration
+	latencyCount     int
+
+	// Latency percentiles
+	latencyP50 time.Duration
+	latencyP90 time.Duration
+	latencyP99 time.Duration
+
+	// Recent samples using circular buffer (thread-safe with mu)
+	recentSamples *CircularBuffer
 }
 
 func (s *Stats) IncrementTotal() {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.totalRequests++
-    s.processingRequests++
-    s.printStatsIfNeeded()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.totalRequests++
+	s.processingRequests++
+	s.printStatsIfNeeded()
 }
 
 func (s *Stats) DecrementProcessing() {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    if s.processingRequests > 0 {
-        s.processingRequests--
-    }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.processingRequests > 0 {
+		s.processingRequests--
+	}
 }
 
 func (s *Stats) IncrementSuccess() {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.successRequests++
-    s.printStatsIfNeeded()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.successRequests++
+	s.printStatsIfNeeded()
 }
 
 func (s *Stats) IncrementFailed() {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.failedRequests++
-    s.printStatsIfNeeded()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failedRequests++
+	s.printStatsIfNeeded()
 }
 
 func (s *Stats) IncrementDropped() {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.droppedRequests++
-    s.printStatsIfNeeded()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.droppedRequests++
+	s.printStatsIfNeeded()
 }
 
 func (s *Stats) RecordLatency(latency time.Duration) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-    s.totalLatency += latency
-    s.latencyCount++
+	// Update global statistics
+	s.totalLatency += latency
+	s.latencyCount++
 
-    if s.minLatency == 0 || latency < s.minLatency {
-        s.minLatency = latency
-    }
-    if latency > s.maxLatency {
-        s.maxLatency = latency
-    }
+	// Update global min/max
+	if s.globalMinLatency == math.MaxInt64 || latency < s.globalMinLatency {
+		s.globalMinLatency = latency
+	}
+	if latency > s.globalMaxLatency {
+		s.globalMaxLatency = latency
+	}
 
-    // Add to latency array for percentile calculation
-    s.latenciesMutex.Lock()
-    s.latencies = append(s.latencies, latency)
-    s.latenciesMutex.Unlock()
+	// Add to recent samples circular buffer
+	s.recentSamples.Add(latency)
 
-    s.printStatsIfNeeded()
-}
-
-func (s *Stats) printStatsIfNeeded() {
-    now := time.Now()
-    if now.Sub(s.lastPrintTime) >= s.printInterval {
-        var avgLatency time.Duration
-        if s.latencyCount > 0 {
-            avgLatency = s.totalLatency / time.Duration(s.latencyCount)
-        }
-
-        // Calculate percentiles
-        s.calculatePercentiles()
-
-        log.Printf(ColorGreen+"Stats - Total: %d, Success: %d, Processing: %d, Failed: %d, Dropped: %d"+ColorReset,
-            s.totalRequests, s.successRequests, s.processingRequests, s.failedRequests, s.droppedRequests)
-
-        log.Printf(ColorBlue+"Latency (µs) - Avg: %d, Min: %d, Max: %d, P50: %d, P90: %d, P99: %d"+ColorReset,
-            avgLatency.Microseconds(), s.minLatency.Microseconds(), s.maxLatency.Microseconds(),
-            s.latencyP50.Microseconds(), s.latencyP90.Microseconds(), s.latencyP99.Microseconds())
-
-        s.lastPrintTime = now
-    }
+	s.printStatsIfNeeded()
 }
 
 func (s *Stats) calculatePercentiles() {
-    s.latenciesMutex.Lock()
-    defer s.latenciesMutex.Unlock()
+	samples := s.recentSamples.ToSlice()
+	sampleCount := len(samples)
 
-    if len(s.latencies) == 0 {
-        return
-    }
+	if sampleCount == 0 {
+		return // Nothing to calculate
+	}
 
-    // Sort latencies
-    sortedLatencies := make([]time.Duration, len(s.latencies))
-    copy(sortedLatencies, s.latencies)
+	// Sort the samples for percentile calculation
+	sort.Slice(samples, func(i, j int) bool {
+		return samples[i] < samples[j]
+	})
 
-    // Simple sort algorithm
-    for i := 0; i < len(sortedLatencies); i++ {
-        for j := i + 1; j < len(sortedLatencies); j++ {
-            if sortedLatencies[i] > sortedLatencies[j] {
-                sortedLatencies[i], sortedLatencies[j] = sortedLatencies[j], sortedLatencies[i]
-            }
-        }
-    }
+	// Calculate percentiles with boundary checks
+	p50Index := int(float64(sampleCount) * 0.5)
+	if p50Index >= sampleCount {
+		p50Index = sampleCount - 1
+	}
 
-    // Calculate percentiles
-    p50Index := int(float64(len(sortedLatencies)) * 0.5)
-    p90Index := int(float64(len(sortedLatencies)) * 0.9)
-    p99Index := int(float64(len(sortedLatencies)) * 0.99)
+	p90Index := int(float64(sampleCount) * 0.9)
+	if p90Index >= sampleCount {
+		p90Index = sampleCount - 1
+	}
 
-    s.latencyP50 = sortedLatencies[p50Index]
-    s.latencyP90 = sortedLatencies[p90Index]
-    s.latencyP99 = sortedLatencies[p99Index]
+	p99Index := int(float64(sampleCount) * 0.99)
+	if p99Index >= sampleCount {
+		p99Index = sampleCount - 1
+	}
 
-    // Keep only the last 1000 samples
-    if len(s.latencies) > 1000 {
-        s.latencies = s.latencies[len(s.latencies)-1000:]
-    }
+	// Set percentiles
+	s.latencyP50 = samples[p50Index]
+	s.latencyP90 = samples[p90Index]
+	s.latencyP99 = samples[p99Index]
+}
+
+func (s *Stats) printStatsIfNeeded() {
+	now := time.Now()
+	if now.Sub(s.lastPrintTime) >= s.printInterval {
+		// Calculate global average latency
+		var globalAvgLatency time.Duration
+		if s.latencyCount > 0 {
+			globalAvgLatency = s.totalLatency / time.Duration(s.latencyCount)
+		}
+
+		// Calculate percentiles
+		s.calculatePercentiles()
+
+		// Get recent stats from circular buffer
+		recentMinLatency := s.recentSamples.GetMin()
+		recentMaxLatency := s.recentSamples.GetMax()
+		recentAvgLatency := s.recentSamples.GetAvg()
+
+		// Log statistics
+		log.Printf(ColorGreen+"Stats - Total: %d, Success: %d, Processing: %d, Failed: %d, Dropped: %d"+ColorReset,
+			s.totalRequests, s.successRequests, s.processingRequests, s.failedRequests, s.droppedRequests)
+
+		log.Printf(ColorBlue+"Global Latency (µs) - Avg: %d, Min: %d, Max: %d"+ColorReset,
+			globalAvgLatency.Microseconds(),
+			s.globalMinLatency.Microseconds(),
+			s.globalMaxLatency.Microseconds())
+
+		log.Printf(ColorPurple+"Recent Latency (µs) - Avg: %d, Min: %d, Max: %d, P50: %d, P90: %d, P99: %d"+ColorReset,
+			recentAvgLatency.Microseconds(),
+			recentMinLatency.Microseconds(),
+			recentMaxLatency.Microseconds(),
+			s.latencyP50.Microseconds(),
+			s.latencyP90.Microseconds(),
+			s.latencyP99.Microseconds())
+
+		s.lastPrintTime = now
+	}
 }
 
 // ========================== Configuration Functions ========================== //
 
 // getEnvString returns environment variable or default value
 func getEnvString(key, defaultValue string) string {
-    if value, exists := os.LookupEnv(key); exists {
-        return value
-    }
-    return defaultValue
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
 }
 
 // getEnvInt returns environment variable as int or default value
 func getEnvInt(key string, defaultValue int) int {
-    if value, exists := os.LookupEnv(key); exists {
-        if intVal, err := strconv.Atoi(value); err == nil {
-            return intVal
-        }
-        log.Printf("Warning: Invalid value for %s, using default: %d", key, defaultValue)
-    }
-    return defaultValue
+	if value, exists := os.LookupEnv(key); exists {
+		if intVal, err := strconv.Atoi(value); err == nil {
+			return intVal
+		}
+		log.Printf("Warning: Invalid value for %s, using default: %d", key, defaultValue)
+	}
+	return defaultValue
 }
 
 // getEnvDuration parses environment variable as duration or returns default
 func getEnvDuration(key, defaultValue string) (time.Duration, error) {
-    value := getEnvString(key, defaultValue)
-    return time.ParseDuration(value)
+	value := getEnvString(key, defaultValue)
+	return time.ParseDuration(value)
 }
 
 // loadConfig loads application configuration from environment variables
 func loadConfig() (*Config, error) {
-    config := &Config{}
+	config := &Config{}
 
-    // URLs
-    config.WsURL = getEnvString("WS_URL", "ws://127.0.0.1:8900")
-    config.RpcURL = getEnvString("RPC_URL", "http://127.0.0.1:8899")
+	// URLs
+	config.WsURL = getEnvString("WS_URL", "ws://127.0.0.1:8900")
+	config.RpcURL = getEnvString("RPC_URL", "http://127.0.0.1:8899")
 
-    // Account monitoring
-    config.MonitoredAddress = getEnvString("MONITORED_ADDRESS", "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM")
+	// Account monitoring
+	config.MonitoredAddress = getEnvString("MONITORED_ADDRESS", "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM")
 
-    // Worker configuration
-    config.WorkerCount = getEnvInt("WORKER_COUNT", 10)
-    config.JobQueueSize = getEnvInt("JOB_QUEUE_SIZE", 1000)
-    config.MaxRetries = getEnvInt("MAX_RETRIES", 3)
+	// Worker configuration
+	config.WorkerCount = getEnvInt("WORKER_COUNT", 10)
+	config.JobQueueSize = getEnvInt("JOB_QUEUE_SIZE", 1000)
+	config.MaxRetries = getEnvInt("MAX_RETRIES", 3)
 
-    // Timing settings
-    var err error
+	// Timing settings
+	var err error
 
-    config.ReconnectDelay, err = getEnvDuration("RECONNECT_INITIAL", "5s")
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse RECONNECT_INITIAL: %w", err)
-    }
+	config.ReconnectDelay, err = getEnvDuration("RECONNECT_INITIAL", "5s")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse RECONNECT_INITIAL: %w", err)
+	}
 
-    config.HttpTimeout, err = getEnvDuration("HTTP_TIMEOUT", "10s")
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse HTTP_TIMEOUT: %w", err)
-    }
+	config.HttpTimeout, err = getEnvDuration("HTTP_TIMEOUT", "10s")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse HTTP_TIMEOUT: %w", err)
+	}
 
-    config.StatsInterval, err = getEnvDuration("STATS_INTERVAL", "5s")
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse STATS_INTERVAL: %w", err)
-    }
+	config.StatsInterval, err = getEnvDuration("STATS_INTERVAL", "5s")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse STATS_INTERVAL: %w", err)
+	}
 
-    // Default values for other settings
-    config.PingInterval = 30 * time.Second
-    config.RetryDelay = 500 * time.Millisecond
+	// Default values for other settings
+	config.PingInterval = 30 * time.Second
+	config.RetryDelay = 500 * time.Millisecond
 
-    return config, nil
+	return config, nil
 }
 
 // ========================== Main Entry ========================== //
 
 func main() {
-    // Load configuration from environment variables
-    config, err := loadConfig()
-    if err != nil {
-        log.Fatalf("Failed to load configuration: %v", err)
-    }
+	// Load configuration from environment variables
+	config, err := loadConfig()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
 
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-    // Initialize statistics
-    stats := &Stats{
-        lastPrintTime: time.Now(),
-        printInterval: config.StatsInterval,
-        minLatency:    time.Duration(0),
-        latencies:     make([]time.Duration, 0, 1000),
-    }
+	// Initialize statistics with proper initial values
+	stats := &Stats{
+		lastPrintTime:    time.Now(),
+		printInterval:    config.StatsInterval,
+		globalMinLatency: math.MaxInt64, // Initialize to maximum value
+		recentSamples:    NewCircularBuffer(RecentSamplesSize),
+	}
 
-    // Create global HTTP client
-    httpClient := &http.Client{
-        Timeout: config.HttpTimeout,
-        Transport: &http.Transport{
-            MaxIdleConns:        100,
-            MaxIdleConnsPerHost: 100,
-            IdleConnTimeout:     90 * time.Second,
-        },
-    }
+	// Create global HTTP client
+	httpClient := &http.Client{
+		Timeout: config.HttpTimeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 
-    // Create job queue and result channel
-    jobQueue := make(chan TransactionJob, config.JobQueueSize)
-    resultChan := make(chan TransactionResponse, config.JobQueueSize)
+	// Create job queue and result channel
+	jobQueue := make(chan TransactionJob, config.JobQueueSize)
+	resultChan := make(chan TransactionResponse, config.JobQueueSize)
 
-    // Start stats collector
-    go statsCollector(ctx, resultChan, stats)
+	// Start stats collector
+	go statsCollector(ctx, resultChan, stats)
 
-    // Start worker pool
-    var wg sync.WaitGroup
-    for i := 0; i < config.WorkerCount; i++ {
-        wg.Add(1)
-        go worker(ctx, i, jobQueue, resultChan, httpClient, config, &wg)
-    }
+	// Start worker pool
+	var wg sync.WaitGroup
+	for i := 0; i < config.WorkerCount; i++ {
+		wg.Add(1)
+		go worker(ctx, i, jobQueue, resultChan, httpClient, config, &wg)
+	}
 
-    // Start WebSocket listener
-    for {
-        if err := startWebSocketListener(ctx, jobQueue, stats, config); err != nil {
-            log.Printf("WebSocket connection lost: %v, reconnecting in %d ms...",
-                err, config.ReconnectDelay.Milliseconds())
-            select {
-            case <-ctx.Done():
-                goto cleanup
-            case <-time.After(config.ReconnectDelay):
-                continue
-            }
-        }
-        break
-    }
+	// Start WebSocket listener
+	for {
+		if err := startWebSocketListener(ctx, jobQueue, stats, config); err != nil {
+			log.Printf("WebSocket connection lost: %v, reconnecting in %d ms...",
+				err, config.ReconnectDelay.Milliseconds())
+			select {
+			case <-ctx.Done():
+				goto cleanup
+			case <-time.After(config.ReconnectDelay):
+				continue
+			}
+		}
+		break
+	}
 
 cleanup:
-    // Close job queue and wait for all workers to complete
-    close(jobQueue)
-    wg.Wait()
-    close(resultChan)
-    log.Println("Program exited normally")
+	// Close job queue and wait for all workers to complete
+	close(jobQueue)
+	wg.Wait()
+	close(resultChan)
+	log.Println("Program exited normally")
 }
 
 // statsCollector collects and processes transaction results
 func statsCollector(ctx context.Context, results <-chan TransactionResponse, stats *Stats) {
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case result, ok := <-results:
-            if !ok {
-                return
-            }
-            if result.Success {
-                stats.IncrementSuccess()
-                stats.DecrementProcessing()
-                stats.RecordLatency(result.Latency)
-                log.Printf(ColorYellow+"Transaction %s processed successfully, latency: %d µs (slot: %d)"+ColorReset,
-                    result.Signature, result.Latency.Microseconds(), result.Slot)
-            } else {
-                stats.IncrementFailed()
-                stats.DecrementProcessing()
-                log.Printf(ColorRed+"Transaction %s processing failed: %v"+ColorReset, result.Signature, result.Error)
-            }
-        }
-    }
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case result, ok := <-results:
+			if !ok {
+				return
+			}
+			if result.Success {
+				stats.IncrementSuccess()
+				stats.DecrementProcessing()
+				stats.RecordLatency(result.Latency)
+				log.Printf(ColorYellow+"Transaction %s processed successfully, latency: %d µs (slot: %d)"+ColorReset,
+					result.Signature, result.Latency.Microseconds(), result.Slot)
+			} else {
+				stats.IncrementFailed()
+				stats.DecrementProcessing()
+				log.Printf(ColorRed+"Transaction %s processing failed: %v"+ColorReset, result.Signature, result.Error)
+			}
+		}
+	}
 }
 
 // ========================== WebSocket Listener ========================== //
 
 func startWebSocketListener(ctx context.Context, jobQueue chan<- TransactionJob, stats *Stats, config *Config) error {
-    // Connect to WebSocket
-    log.Printf("Connecting to WebSocket: %s", config.WsURL)
+	// Connect to WebSocket
+	log.Printf("Connecting to WebSocket: %s", config.WsURL)
 
-    dialer := websocket.DefaultDialer
-    dialer.HandshakeTimeout = 10 * time.Second
+	dialer := websocket.DefaultDialer
+	dialer.HandshakeTimeout = 10 * time.Second
 
-    conn, _, err := dialer.Dial(config.WsURL, nil)
-    if err != nil {
-        return fmt.Errorf("failed to connect to WebSocket: %w", err)
-    }
-    defer conn.Close()
-    log.Println("Successfully connected to WebSocket")
+	conn, _, err := dialer.Dial(config.WsURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to WebSocket: %w", err)
+	}
+	defer conn.Close()
+	log.Println("Successfully connected to WebSocket")
 
-    // Send subscription request
-    subscribeMsg := RPCRequest{
-        JsonRPC: "2.0",
-        ID:      1,
-        Method:  "logsSubscribe",
-        Params: []interface{}{
-            map[string]interface{}{
-                "mentions": []string{config.MonitoredAddress},
-            },
-            map[string]interface{}{
-                "commitment": "confirmed",
-            },
-        },
-    }
+	// Send subscription request
+	subscribeMsg := RPCRequest{
+		JsonRPC: "2.0",
+		ID:      1,
+		Method:  "logsSubscribe",
+		Params: []interface{}{
+			map[string]interface{}{
+				"mentions": []string{config.MonitoredAddress},
+			},
+			map[string]interface{}{
+				"commitment": "confirmed",
+			},
+		},
+	}
 
-    if err := conn.WriteJSON(subscribeMsg); err != nil {
-        return fmt.Errorf("failed to send subscription request: %w", err)
-    }
-    log.Printf("Subscription request sent, monitoring account: %s", config.MonitoredAddress)
+	if err := conn.WriteJSON(subscribeMsg); err != nil {
+		return fmt.Errorf("failed to send subscription request: %w", err)
+	}
+	log.Printf("Subscription request sent, monitoring account: %s", config.MonitoredAddress)
 
-    // Wait for subscription confirmation
-    _, msg, err := conn.ReadMessage()
-    if err != nil {
-        return fmt.Errorf("failed to read subscription confirmation: %w", err)
-    }
-    log.Printf("Subscription confirmed: %s", msg)
+	// Wait for subscription confirmation
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		return fmt.Errorf("failed to read subscription confirmation: %w", err)
+	}
+	log.Printf("Subscription confirmed: %s", msg)
 
-    // Set ping handler to keep connection alive
-    conn.SetPingHandler(func(appData string) error {
-        return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
-    })
+	// Set ping handler to keep connection alive
+	conn.SetPingHandler(func(appData string) error {
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+	})
 
-    // Set pong handler to track liveness
-    lastPong := time.Now()
-    conn.SetPongHandler(func(string) error {
-        lastPong = time.Now()
-        return nil
-    })
+	// Set pong handler to track liveness
+	lastPong := time.Now()
+	conn.SetPongHandler(func(string) error {
+		lastPong = time.Now()
+		return nil
+	})
 
-    // Start ping sender to keep connection
-    wsCtx, cancel := context.WithCancel(ctx)
-    defer cancel()
+	// Start ping sender to keep connection
+	wsCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-    // Periodically send ping
-    go func() {
-        ticker := time.NewTicker(config.PingInterval)
-        defer ticker.Stop()
+	// Periodically send ping
+	go func() {
+		ticker := time.NewTicker(config.PingInterval)
+		defer ticker.Stop()
 
-        for {
-            select {
-            case <-wsCtx.Done():
-                return
-            case <-ticker.C:
-                // Check last pong time
-                if time.Since(lastPong) > config.PingInterval*2 {
-                    log.Printf(ColorRed+"WebSocket seems disconnected, no pong received for %d ms"+ColorReset,
-                        (config.PingInterval * 2).Milliseconds())
-                    cancel() // Trigger reconnect
-                    return
-                }
+		for {
+			select {
+			case <-wsCtx.Done():
+				return
+			case <-ticker.C:
+				// Check last pong time
+				if time.Since(lastPong) > config.PingInterval*2 {
+					log.Printf(ColorRed+"WebSocket seems disconnected, no pong received for %d ms"+ColorReset,
+						(config.PingInterval * 2).Milliseconds())
+					cancel() // Trigger reconnect
+					return
+				}
 
-                if err := conn.WriteControl(
-                    websocket.PingMessage,
-                    []byte{},
-                    time.Now().Add(5*time.Second),
-                ); err != nil {
-                    log.Printf("Failed to send ping: %v", err)
-                    cancel() // Trigger reconnect
-                    return
-                }
-            }
-        }
-    }()
+				if err := conn.WriteControl(
+					websocket.PingMessage,
+					[]byte{},
+					time.Now().Add(5*time.Second),
+				); err != nil {
+					log.Printf("Failed to send ping: %v", err)
+					cancel() // Trigger reconnect
+					return
+				}
+			}
+		}
+	}()
 
-    // Clear read deadline
-    conn.SetReadDeadline(time.Time{})
+	// Clear read deadline
+	conn.SetReadDeadline(time.Time{})
 
-    // Start listening for WebSocket messages
-    for {
-        select {
-        case <-wsCtx.Done():
-            return nil
-        default:
-            // Read message
-            _, msg, err := conn.ReadMessage()
-            if err != nil {
-                return fmt.Errorf("error reading WebSocket message: %w", err)
-            }
-            // Try parsing as logsNotification
-            var ln LogsNotification
-            if err := json.Unmarshal(msg, &ln); err == nil && ln.Method == "logsNotification" {
-                signature := ln.Params.Result.Value.Signature
-                slot := ln.Params.Result.Context.Slot
+	// Start listening for WebSocket messages
+	for {
+		select {
+		case <-wsCtx.Done():
+			return nil
+		default:
+			// Read message
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return fmt.Errorf("error reading WebSocket message: %w", err)
+			}
+			// Try parsing as logsNotification
+			var ln LogsNotification
+			if err := json.Unmarshal(msg, &ln); err == nil && ln.Method == "logsNotification" {
+				signature := ln.Params.Result.Value.Signature
+				slot := ln.Params.Result.Context.Slot
 
-                if signature != "" {
-                    log.Printf("Detected transaction signature: %s (slot: %d)", signature, slot)
+				if signature != "" {
+					log.Printf("Detected transaction signature: %s (slot: %d)", signature, slot)
 
-                    // Send task to job queue, record reception time
-                    job := TransactionJob{
-                        Signature:  signature,
-                        Slot:       slot,
-                        ReceivedAt: time.Now(), // Record reception time for latency calculation
-                    }
+					// Send task to job queue, record reception time
+					job := TransactionJob{
+						Signature:  signature,
+						Slot:       slot,
+						ReceivedAt: time.Now(), // Record reception time for latency calculation
+					}
 
-                    select {
-                    case jobQueue <- job:
-                        stats.IncrementTotal()
-                    default:
-                        log.Printf(ColorPurple+"Warning: Job queue full, dropping transaction: %s"+ColorReset, signature)
-                        stats.IncrementDropped()
-                    }
-                }
-            }
-        }
-    }
+					select {
+					case jobQueue <- job:
+						stats.IncrementTotal()
+					default:
+						log.Printf(ColorPurple+"Warning: Job queue full, dropping transaction: %s"+ColorReset, signature)
+						stats.IncrementDropped()
+					}
+				}
+			}
+		}
+	}
 }
 
 // ========================== Worker Thread ========================== //
 
 func worker(
-    ctx context.Context,
-    id int,
-    jobs <-chan TransactionJob,
-    results chan<- TransactionResponse,
-    httpClient *http.Client,
-    config *Config,
-    wg *sync.WaitGroup,
+	ctx context.Context,
+	id int,
+	jobs <-chan TransactionJob,
+	results chan<- TransactionResponse,
+	httpClient *http.Client,
+	config *Config,
+	wg *sync.WaitGroup,
 ) {
-    defer wg.Done()
-    log.Printf("Worker #%d started", id)
+	defer wg.Done()
+	log.Printf("Worker #%d started", id)
 
-    for {
-        select {
-        case <-ctx.Done():
-            log.Printf("Worker #%d received exit signal", id)
-            return
-        case job, ok := <-jobs:
-            if !ok {
-                log.Printf("Worker #%d job queue closed, exiting", id)
-                return
-            }
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Worker #%d received exit signal", id)
+			return
+		case job, ok := <-jobs:
+			if !ok {
+				log.Printf("Worker #%d job queue closed, exiting", id)
+				return
+			}
 
-            log.Printf("Worker #%d processing transaction: %s", id, job.Signature)
+			log.Printf("Worker #%d processing transaction: %s", id, job.Signature)
 
-            // Process transaction with retry
-            txResult, err := getTransactionWithRetry(ctx, job.Signature, httpClient, config)
+			// Process transaction with retry
+			txResult, err := getTransactionWithRetry(ctx, job.Signature, httpClient, config)
 
-            // Calculate request latency (microsecond precision)
-            latency := time.Since(job.ReceivedAt)
+			// Calculate request latency (microsecond precision)
+			latency := time.Since(job.ReceivedAt)
 
-            // Send result
-            result := TransactionResponse{
-                Success:   err == nil,
-                Latency:   latency,
-                Error:     err,
-                Signature: job.Signature,
-            }
+			// Send result
+			result := TransactionResponse{
+				Success:   err == nil,
+				Latency:   latency,
+				Error:     err,
+				Signature: job.Signature,
+			}
 
-            if txResult != nil {
-                result.Slot = txResult.Slot
-            }
+			if txResult != nil {
+				result.Slot = txResult.Slot
+			}
 
-            select {
-            case results <- result:
-                // Result sent
-            case <-ctx.Done():
-                return
-            }
-        }
-    }
+			select {
+			case results <- result:
+				// Result sent
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 }
 
 // ========================== getTransaction RPC Call ========================== //
 
 // getTransactionWithRetry transaction retrieval function with retry mechanism
 func getTransactionWithRetry(ctx context.Context, signature string, client *http.Client, config *Config) (*GetTransactionResult, error) {
-    var lastErr error
+	var lastErr error
 
-    for attempt := 0; attempt <= config.MaxRetries; attempt++ {
-        if attempt > 0 {
-            // Wait before retrying
-            select {
-            case <-ctx.Done():
-                return nil, ctx.Err()
-            case <-time.After(config.RetryDelay * time.Duration(attempt)):
-                // Continue retrying
-            }
-            log.Printf("Retrying to get transaction %s (attempt %d/%d)", signature, attempt, config.MaxRetries)
-        }
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			// Wait before retrying
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(config.RetryDelay * time.Duration(attempt)):
+				// Continue retrying
+			}
+			log.Printf("Retrying to get transaction %s (attempt %d/%d)", signature, attempt, config.MaxRetries)
+		}
 
-        result, err := getTransaction(ctx, signature, client, config)
-        if err == nil {
-            return result, nil
-        }
+		result, err := getTransaction(ctx, signature, client, config)
+		if err == nil {
+			return result, nil
+		}
 
-        lastErr = err
-        log.Printf("Failed to get transaction: %v, will retry...", err)
-    }
+		lastErr = err
+		log.Printf("Failed to get transaction: %v, will retry...", err)
+	}
 
-    return nil, fmt.Errorf("failed to get transaction after %d attempts: %w", config.MaxRetries, lastErr)
+	return nil, fmt.Errorf("failed to get transaction after %d attempts: %w", config.MaxRetries, lastErr)
 }
 
 func getTransaction(ctx context.Context, signature string, client *http.Client, config *Config) (*GetTransactionResult, error) {
-    // Create context with timeout
-    reqCtx, cancel := context.WithTimeout(ctx, config.HttpTimeout)
-    defer cancel()
+	// Create context with timeout
+	reqCtx, cancel := context.WithTimeout(ctx, config.HttpTimeout)
+	defer cancel()
 
-    // Construct request body
-    req := RPCRequest{
-        JsonRPC: "2.0",
-        ID:      1,
-        Method:  "getTransaction",
-        Params: []interface{}{
-            signature,
-            map[string]interface{}{
-                "encoding":                       "jsonParsed",
-                "maxSupportedTransactionVersion": 0,
-            },
-        },
-    }
+	// Construct request body
+	req := RPCRequest{
+		JsonRPC: "2.0",
+		ID:      1,
+		Method:  "getTransaction",
+		Params: []interface{}{
+			signature,
+			map[string]interface{}{
+				"encoding":                       "jsonParsed",
+				"maxSupportedTransactionVersion": 0,
+			},
+		},
+	}
 
-    // Serialize request
-    rawBody, err := json.Marshal(req)
-    if err != nil {
-        return nil, fmt.Errorf("failed to serialize RPC request: %w", err)
-    }
+	// Serialize request
+	rawBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize RPC request: %w", err)
+	}
 
-    // Create HTTP request
-    httpReq, err := http.NewRequestWithContext(reqCtx, "POST", config.RpcURL, bytes.NewBuffer(rawBody))
-    if err != nil {
-        return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-    }
-    httpReq.Header.Set("Content-Type", "application/json")
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", config.RpcURL, bytes.NewBuffer(rawBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
 
-    // Make HTTP request
-    resp, err := client.Do(httpReq)
-    if err != nil {
-        return nil, fmt.Errorf("HTTP request failed: %w", err)
-    }
-    defer resp.Body.Close()
+	// Make HTTP request
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
 
-    // Parse response
-    var rpcResp RPCResponse
-    if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-        return nil, fmt.Errorf("failed to parse RPC response: %w", err)
-    }
+	// Parse response
+	var rpcResp RPCResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return nil, fmt.Errorf("failed to parse RPC response: %w", err)
+	}
 
-    // Check for RPC error
-    if rpcResp.Error != nil {
-        return nil, fmt.Errorf("RPC error response: code=%d, msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
-    }
+	// Check for RPC error
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("RPC error response: code=%d, msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
 
-    // Parse getTransaction result
-    var txRes GetTransactionResult
-    if err := json.Unmarshal(rpcResp.Result, &txRes); err != nil {
-        return nil, fmt.Errorf("failed to parse getTransaction result: %w", err)
-    }
+	// Parse getTransaction result
+	var txRes GetTransactionResult
+	if err := json.Unmarshal(rpcResp.Result, &txRes); err != nil {
+		return nil, fmt.Errorf("failed to parse getTransaction result: %w", err)
+	}
 
-    return &txRes, nil
+	return &txRes, nil
 }
+
 EOF
 
 go mod tidy
